@@ -8,13 +8,12 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"testing/fstest"
 	"testing/iotest"
 
 	"github.com/bodgit/sevenzip"
-	"github.com/bodgit/sevenzip/internal/util"
-	"github.com/stretchr/testify/assert"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -37,7 +36,7 @@ func extractFile(tb testing.TB, r io.Reader, h hash.Hash, f *sevenzip.File) erro
 		return nil
 	}
 
-	if !util.CRC32Equal(h.Sum(nil), f.CRC32) {
+	if !sevenzip.CRC32Equal(h.Sum(nil), f.CRC32) {
 		return errors.New("CRC doesn't match")
 	}
 
@@ -195,8 +194,9 @@ func TestOpenReader(t *testing.T) {
 
 			r, err := sevenzip.OpenReader(filepath.Join("testdata", table.file))
 			if err != nil {
-				assert.ErrorIs(t, err, table.err)
-
+				if !errors.Is(err, table.err) {
+					t.Fatalf("Target error should be in err chain:\nexpected: %q\nin chain: %s", table.err, err)
+				}
 				return
 			}
 			defer r.Close()
@@ -211,8 +211,9 @@ func TestOpenReader(t *testing.T) {
 				volumes = append(volumes, filepath.Join("testdata", table.file))
 			}
 
-			assert.Equal(t, volumes, r.Volumes())
-
+			if !slices.Equal(volumes, r.Volumes()) {
+				t.Fatalf("Not equal: expected %#v, got %#v\n", volumes, r.Volumes())
+			}
 			if err := extractArchive(t, r, -1, crc32.NewIEEE(), iotest.OneByteReader, true); err != nil {
 				t.Fatal(err)
 			}

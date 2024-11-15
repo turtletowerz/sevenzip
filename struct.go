@@ -8,9 +8,9 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"sync/atomic"
 	"time"
 
-	"github.com/bodgit/plumbing"
 	"github.com/bodgit/sevenzip/internal/util"
 )
 
@@ -97,14 +97,14 @@ func (f *folder) coderReader(readers []io.ReadCloser, coder uint64, password str
 		}
 	}
 
-	return plumbing.LimitReadCloser(cr, int64(f.size[coder])), nil //nolint:gosec
+	return util.LimitReadCloser(cr, int64(f.size[coder])), nil //nolint:gosec
 }
 
 type folderReadCloser struct {
-	io.ReadCloser
-	h    hash.Hash
-	wc   *plumbing.WriteCounter
-	size int64
+	r     io.ReadCloser
+	h     hash.Hash
+	count atomic.Int64
+	size  int64
 }
 
 func (rc *folderReadCloser) Checksum() []byte {
@@ -114,11 +114,13 @@ func (rc *folderReadCloser) Checksum() []byte {
 func (rc *folderReadCloser) Seek(offset int64, whence int) (int64, error) {
 	var newo int64
 
+	size := rc.count.Load()
+
 	switch whence {
 	case io.SeekStart:
 		newo = offset
 	case io.SeekCurrent:
-		newo = int64(rc.wc.Count()) + offset //nolint:gosec
+		newo = size + offset //nolint:gosec
 	case io.SeekEnd:
 		newo = rc.Size() + offset
 	default:
@@ -129,7 +131,7 @@ func (rc *folderReadCloser) Seek(offset int64, whence int) (int64, error) {
 		return 0, errors.New("negative seek")
 	}
 
-	if uint64(newo) < rc.wc.Count() {
+	if newo < size {
 		return 0, errors.New("cannot seek backwards")
 	}
 
@@ -137,7 +139,7 @@ func (rc *folderReadCloser) Seek(offset int64, whence int) (int64, error) {
 		return 0, errors.New("cannot seek beyond EOF")
 	}
 
-	if _, err := io.CopyN(io.Discard, rc, newo-int64(rc.wc.Count())); err != nil { //nolint:gosec
+	if _, err := io.CopyN(io.Discard, rc, newo-size); err != nil { //nolint:gosec
 		return 0, err
 	}
 
@@ -148,14 +150,30 @@ func (rc *folderReadCloser) Size() int64 {
 	return rc.size
 }
 
-func newFolderReadCloser(rc io.ReadCloser, size int64) *folderReadCloser {
-	nrc := new(folderReadCloser)
-	nrc.h = crc32.NewIEEE()
-	nrc.wc = new(plumbing.WriteCounter)
-	nrc.ReadCloser = plumbing.TeeReadCloser(rc, io.MultiWriter(nrc.h, nrc.wc))
-	nrc.size = size
+// Essentially just TeeReader but with a count to follow how many bytes are actually being written
+func (rc *folderReadCloser) Read(p []byte) (n int, err error) {
+	n, err = rc.r.Read(p)
+	if n > 0 {
+		rc.count.Add(int64(n))
 
-	return nrc
+		if n, err := rc.h.Write(p[:n]); err != nil {
+			return n, err
+		}
+	}
+
+	return
+}
+
+func (rc *folderReadCloser) Close() error {
+	return rc.r.Close()
+}
+
+func newFolderReadCloser(rc io.ReadCloser, size int64) *folderReadCloser {
+	return &folderReadCloser{
+		r:    rc,
+		h:    crc32.NewIEEE(),
+		size: size,
+	}
 }
 
 func (f *folder) unpackSize() uint64 {

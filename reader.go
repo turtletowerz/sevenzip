@@ -17,11 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bodgit/plumbing"
-	"github.com/bodgit/sevenzip/internal/pool"
 	"github.com/bodgit/sevenzip/internal/util"
-	"github.com/hashicorp/go-multierror"
-	"go4.org/readerutil"
 )
 
 var (
@@ -38,7 +34,7 @@ type Reader struct {
 	si    *streamsInfo
 	p     string
 	File  []*File
-	pool  []pool.Pooler
+	pool  []*cacher
 
 	fileListOnce sync.Once
 	fileList     []fileListEntry
@@ -103,10 +99,7 @@ func (fr *fileReader) Close() error {
 			return err
 		}
 	} else {
-		f := fr.f
-		if _, err := f.zip.pool[f.folder].Put(offset, fr.rc); err != nil {
-			return err
-		}
+		fr.f.zip.pool[fr.f.folder].Add(offset, fr.rc)
 	}
 
 	fr.rc = nil
@@ -143,6 +136,11 @@ func (f *File) Open() (io.ReadCloser, error) {
 	}, nil
 }
 
+// CRC32Equal compares CRC32 checksums.
+func CRC32Equal(b []byte, c uint32) bool {
+	return bytes.Equal(b, []byte{byte(0xff & (c >> 24)), byte(0xff & (c >> 16)), byte(0xff & (c >> 8)), byte(0xff & c)})
+}
+
 // OpenReaderWithPassword will open the 7-zip file specified by name using
 // password as the basis of the decryption key and return a ReadCloser. If
 // name has a ".001" suffix it is assumed there are multiple volumes and each
@@ -157,7 +155,7 @@ func OpenReaderWithPassword(name, password string) (*ReadCloser, error) {
 
 	info, err := f.Stat()
 	if err != nil {
-		err = multierror.Append(err, f.Close())
+		f.Close()
 
 		return nil, err
 	}
@@ -168,7 +166,7 @@ func OpenReaderWithPassword(name, password string) (*ReadCloser, error) {
 	files := []*os.File{f}
 
 	if ext := filepath.Ext(name); ext == ".001" {
-		sr := []readerutil.SizeReaderAt{io.NewSectionReader(f, 0, size)}
+		sr := []util.SizeReaderAt{io.NewSectionReader(f, 0, size)}
 
 		for i := 2; true; i++ {
 			f, err := os.Open(fmt.Sprintf("%s.%03d", strings.TrimSuffix(name, ext), i))
@@ -178,7 +176,7 @@ func OpenReaderWithPassword(name, password string) (*ReadCloser, error) {
 				}
 
 				for _, file := range files {
-					err = multierror.Append(err, file.Close())
+					file.Close()
 				}
 
 				return nil, err
@@ -189,7 +187,7 @@ func OpenReaderWithPassword(name, password string) (*ReadCloser, error) {
 			info, err = f.Stat()
 			if err != nil {
 				for _, file := range files {
-					err = multierror.Append(err, file.Close())
+					file.Close()
 				}
 
 				return nil, err
@@ -198,7 +196,7 @@ func OpenReaderWithPassword(name, password string) (*ReadCloser, error) {
 			sr = append(sr, io.NewSectionReader(f, 0, info.Size()))
 		}
 
-		mr := readerutil.NewMultiReaderAt(sr...)
+		mr := util.NewMultiReaderAt(sr...)
 		reader, size = mr, mr.Size()
 	}
 
@@ -207,7 +205,7 @@ func OpenReaderWithPassword(name, password string) (*ReadCloser, error) {
 
 	if err := r.init(reader, size); err != nil {
 		for _, file := range files {
-			err = multierror.Append(err, file.Close())
+			file.Close()
 		}
 
 		return nil, err
@@ -296,7 +294,7 @@ func findSignature(r io.ReaderAt, search []byte) ([]int64, error) {
 //nolint:cyclop,funlen,gocognit,gocyclo
 func (z *Reader) init(r io.ReaderAt, size int64) error {
 	h := crc32.NewIEEE()
-	tra := plumbing.TeeReaderAt(r, h)
+	tra := util.TeeReaderAt(r, h)
 
 	signature := []byte{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}
 
@@ -332,7 +330,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 		}
 
 		// CRC of the start header should match
-		if util.CRC32Equal(h.Sum(nil), sh.CRC) {
+		if CRC32Equal(h.Sum(nil), sh.CRC) {
 			break
 		}
 
@@ -381,7 +379,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 			return err
 		}
 	default:
-		return errUnexpectedID
+		return ErrUnexpectedID
 	}
 
 	// If there's more data to read, we've not parsed this correctly. This
@@ -391,7 +389,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 	}
 
 	// CRC should match the one from the start header
-	if !util.CRC32Equal(h.Sum(nil), start.CRC) {
+	if !CRC32Equal(h.Sum(nil), start.CRC) {
 		return errChecksum
 	}
 
@@ -412,7 +410,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 			return err
 		}
 
-		if crc != 0 && !util.CRC32Equal(fr.Checksum(), crc) {
+		if crc != 0 && !CRC32Equal(fr.Checksum(), crc) {
 			return errChecksum
 		}
 	}
@@ -460,15 +458,9 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 
 	// spew.Dump(filesPerStream)
 
-	z.pool = make([]pool.Pooler, z.si.Folders())
+	z.pool = make([]*cacher, z.si.Folders())
 	for i := range z.pool {
-		var newPool pool.Constructor = pool.NewNoopPool
-
-		if filesPerStream[i] > 1 {
-			newPool = pool.NewPool
-		}
-
-		if z.pool[i], err = newPool(); err != nil {
+		if z.pool[i], err = newCachePool(filesPerStream[i] < 2); err != nil {
 			return err
 		}
 	}
@@ -488,12 +480,11 @@ func (rc *ReadCloser) Volumes() []string {
 
 // Close closes the 7-zip file or volumes, rendering them unusable for I/O.
 func (rc *ReadCloser) Close() error {
-	var err *multierror.Error
 	for _, f := range rc.f {
-		err = multierror.Append(err, f.Close())
+		f.Close()
 	}
 
-	return err.ErrorOrNil()
+	return nil
 }
 
 type fileListEntry struct {

@@ -5,9 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"sync"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"go4.org/syncutil"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -22,18 +22,15 @@ const cacheSize = 10
 
 //nolint:gochecknoglobals
 var (
-	once  syncutil.Once
+	once  sync.Once
 	cache *lru.Cache[cacheKey, []byte]
 )
 
 func calculateKey(password string, cycles int, salt []byte) ([]byte, error) {
-	if err := once.Do(func() (err error) {
-		cache, err = lru.New[cacheKey, []byte](cacheSize)
-
-		return
-	}); err != nil {
-		return nil, err
-	}
+	once.Do(func() {
+		// NOTE: We can ignore the error because cache size is guaranteed to not be 0
+		cache, _ = lru.New[cacheKey, []byte](cacheSize)
+	})
 
 	ck := cacheKey{
 		password: password,

@@ -7,7 +7,6 @@ import (
 	"io"
 
 	"github.com/bodgit/sevenzip/internal/util"
-	"github.com/hashicorp/go-multierror"
 )
 
 const (
@@ -87,12 +86,14 @@ func NewReader(_ []byte, _ uint64, readers []io.ReadCloser) (io.ReadCloser, erro
 }
 
 func (rc *readCloser) Close() error {
-	var err *multierror.Error
 	if rc.main != nil {
-		err = multierror.Append(err, rc.main.Close(), rc.call.Close(), rc.jump.Close(), rc.rd.Close())
+		rc.main.Close()
+		rc.call.Close()
+		rc.jump.Close()
+		rc.rd.Close()
 	}
 
-	return err.ErrorOrNil()
+	return nil
 }
 
 func (rc *readCloser) Read(p []byte) (int, error) {

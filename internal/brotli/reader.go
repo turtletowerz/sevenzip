@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/andybalholm/brotli"
-	"github.com/bodgit/plumbing"
+	"github.com/bodgit/sevenzip/internal/util"
 )
 
 //nolint:gochecknoglobals
@@ -75,7 +75,7 @@ func NewReader(_ []byte, _ uint64, readers []io.ReadCloser) (io.ReadCloser, erro
 	if hr.FrameMagic == frameMagic && hr.FrameSize == frameSize && hr.BrotliMagic == brotliMagic {
 		reader = readers[0]
 	} else {
-		reader = plumbing.MultiReadCloser(io.NopCloser(b), readers[0])
+		reader = util.MultiReadCloser(io.NopCloser(b), readers[0])
 	}
 
 	r, ok := brotliReaderPool.Get().(*brotli.Reader)

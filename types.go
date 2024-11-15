@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/bodgit/sevenzip/internal/util"
-	"github.com/bodgit/windows"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -46,10 +45,34 @@ const (
 )
 
 var (
-	errIncompleteRead    = errors.New("sevenzip: incomplete read")
-	errUnexpectedID      = errors.New("sevenzip: unexpected id")
-	errMissingUnpackInfo = errors.New("sevenzip: missing unpack info")
+	ErrIncompleteRead    = errors.New("sevenzip: incomplete read")
+	ErrUnexpectedID      = errors.New("sevenzip: unexpected id")
+	ErrMissingUnpackInfo = errors.New("sevenzip: missing unpack info")
 )
+
+// Filetime mirrors the Windows FILETIME structure which represents time
+// as the number of 100-nanosecond intervals that have elapsed since
+// 00:00:00 UTC, January 1, 1601. This code is taken from the
+// golang.org/x/sys/windows package where it's not available for non-Windows
+// platforms however various file formats and protocols pass this structure
+// about so it's useful to have it available for interoperability purposes.
+type filetime struct {
+	LowDateTime  uint32
+	HighDateTime uint32
+}
+
+// Nanoseconds returns Filetime ft in nanoseconds
+// since Epoch (00:00:00 UTC, January 1, 1970).
+func (ft *filetime) Nanoseconds() int64 {
+	// 100-nanosecond intervals since January 1, 1601
+	nsec := int64(ft.HighDateTime)<<32 + int64(ft.LowDateTime)
+	// change starting time to the Epoch (00:00:00 UTC, January 1, 1970) using ftoffset
+	nsec -= 116444736000000000
+	// convert into nanoseconds
+	nsec *= 100
+
+	return nsec
+}
 
 func readUint64(r io.ByteReader) (uint64, error) {
 	b, err := r.ReadByte()
@@ -195,7 +218,7 @@ func readPackInfo(r util.Reader) (*packInfo, error) {
 	}
 
 	if id != idEnd {
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	return p, nil
@@ -216,7 +239,7 @@ func readCoder(r util.Reader) (*coder, error) {
 			return nil, fmt.Errorf("readCoder: Read error: %w", err)
 		}
 
-		return nil, errIncompleteRead
+		return nil, ErrIncompleteRead
 	}
 
 	if v&0x10 != 0 {
@@ -245,7 +268,7 @@ func readCoder(r util.Reader) (*coder, error) {
 				return nil, fmt.Errorf("readCoder: Read error: %w", err)
 			}
 
-			return nil, errIncompleteRead
+			return nil, ErrIncompleteRead
 		}
 	}
 
@@ -323,7 +346,7 @@ func readUnpackInfo(r util.Reader) (*unpackInfo, error) {
 			return nil, fmt.Errorf("readUnpackInfo: ReadByte error: %w", err)
 		}
 
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	folders, err := readUint64(r)
@@ -361,7 +384,7 @@ func readUnpackInfo(r util.Reader) (*unpackInfo, error) {
 			return nil, fmt.Errorf("readUnpackInfo: ReadByte error: %w", err)
 		}
 
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	for _, f := range u.folder {
@@ -395,7 +418,7 @@ func readUnpackInfo(r util.Reader) (*unpackInfo, error) {
 	}
 
 	if id != idEnd {
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	return u, nil
@@ -472,7 +495,7 @@ func readSubStreamsInfo(r util.Reader, folder []*folder) (*subStreamsInfo, error
 	}
 
 	if id != idEnd {
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	return s, nil
@@ -511,7 +534,7 @@ func readStreamsInfo(r util.Reader) (*streamsInfo, error) {
 
 	if id == idSubStreamsInfo {
 		if s.unpackInfo == nil {
-			return nil, errMissingUnpackInfo
+			return nil, ErrMissingUnpackInfo
 		}
 
 		if s.subStreamsInfo, err = readSubStreamsInfo(r, s.unpackInfo.folder); err != nil {
@@ -525,7 +548,7 @@ func readStreamsInfo(r util.Reader) (*streamsInfo, error) {
 	}
 
 	if id != idEnd {
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	return s, nil
@@ -558,7 +581,7 @@ func readTimes(r util.Reader, count uint64) ([]time.Time, error) {
 
 	for i := range defined {
 		if defined[i] {
-			var ft windows.Filetime
+			var ft filetime
 			if err := binary.Read(r, binary.LittleEndian, &ft); err != nil {
 				return nil, fmt.Errorf("readTimes: Read error: %w", err)
 			}
@@ -769,7 +792,7 @@ func readFilesInfo(r util.Reader) (*filesInfo, error) {
 				return nil, fmt.Errorf("readFilesInfo: CopyN error: %w", err)
 			}
 		default:
-			return nil, errUnexpectedID
+			return nil, ErrUnexpectedID
 		}
 	}
 
@@ -788,21 +811,21 @@ func readHeader(r util.Reader) (*header, error) {
 	if id == idArchiveProperties {
 		return nil, errors.New("sevenzip: TODO idArchiveProperties") //nolint:goerr113,revive
 
-		//nolint:govet
-		id, err = r.ReadByte()
-		if err != nil {
-			return nil, fmt.Errorf("readHeader: ReadByte error: %w", err)
-		}
+		// //nolint:govet
+		// id, err = r.ReadByte()
+		// if err != nil {
+		// 	return nil, fmt.Errorf("readHeader: ReadByte error: %w", err)
+		// }
 	}
 
 	if id == idAdditionalStreamsInfo {
 		return nil, errors.New("sevenzip: TODO idAdditionalStreamsInfo") //nolint:goerr113,revive
 
-		//nolint:govet
-		id, err = r.ReadByte()
-		if err != nil {
-			return nil, fmt.Errorf("readHeader: ReadByte error: %w", err)
-		}
+		// //nolint:govet
+		// id, err = r.ReadByte()
+		// if err != nil {
+		// 	return nil, fmt.Errorf("readHeader: ReadByte error: %w", err)
+		// }
 	}
 
 	if id == idMainStreamsInfo {
@@ -828,7 +851,7 @@ func readHeader(r util.Reader) (*header, error) {
 	}
 
 	if id != idEnd {
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	if h.streamsInfo == nil || h.filesInfo == nil {
@@ -859,7 +882,7 @@ func readEncodedHeader(r util.Reader) (*header, error) {
 			return nil, fmt.Errorf("readEncodedHeader: ReadByte error: %w", err)
 		}
 
-		return nil, errUnexpectedID
+		return nil, ErrUnexpectedID
 	}
 
 	header, err := readHeader(r)
